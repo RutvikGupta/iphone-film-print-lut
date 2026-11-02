@@ -3,26 +3,113 @@
 Command (run from the repository root):
 
 ```
-uv run --no-project --python 3.12 --with numpy --with scipy --with pillow --with pillow-heif --with opencv-python-headless --with colour-science --with matplotlib python -I fit/fit_look.py --data-dir pairs-data --out-dir fit-out --user-photos-dir <your-photos-dir>
+uv run --no-project --python 3.12 --with numpy --with scipy --with pillow --with pillow-heif --with opencv-python-headless --with colour-science --with matplotlib python -I fit/fit_look.py --data-dir pairs-data --out-dir fit-out --user-photos-dir <your-photos-dir> --neutralize-script tools/neutralize_lut.py
 ```
 
-Runtime 153 s, seed 20261102. LUTs: `chromagraph_approx_33.cube` (v1 (as shipped; kept for comparison)), `chromagraph_v2_33.cube` (v2, fitted exposure (closest to the data)), `chromagraph_v2_bright_33.cube` (v2 with shadows lifted 0.75 stop, white fixed), `chromagraph_v2_brighter_33.cube` (v2 with shadows lifted 1.5 stops, white fixed). Previews: `preview_<pair>.jpg` (stock | v1 | v2 | Chromagraph), `user_test_<photo>.jpg`. Diagnostics: `diagnostics/` (registration overlays, probe boxes, tone curves, `metrics.json`).
+Runtime 364 s, seed 20261102. LUTs: `chromagraph_approx_33.cube` (v1 (as shipped; kept for comparison)), `chromagraph_v2_33.cube` (v2, fitted exposure (closest to the data)), `chromagraph_v2_bright_33.cube` (v2 with shadows lifted 0.75 stop, white fixed), `chromagraph_v2_brighter_33.cube` (v2 with shadows lifted 1.5 stops, white fixed), `chromagraph_v3_33.cube` (v3: v2 plus hue-dependent chroma gain and rotation, fitted exposure), `chromagraph_v3_bright_33.cube` (v3 with shadows lifted 0.75 stop, white fixed). Previews: `preview_<pair>.jpg` (stock | v2 | v3 | Chromagraph), `user_test_<photo>.jpg`. Diagnostics: `diagnostics/` (registration overlays, probe boxes, tone curves, `metrics.json`).
 
-## Verdict
+## v3 verdict (round 3: saturated colours)
+
+Averaged over all 9 held-out pairs, v3 scores **6.43 median / 14.85 p95** CIEDE2000 against **6.68 / 14.65** for v2, with the lower median on 4 of 9 pairs. **v3 beats v2 on the mean held-out median.**
+
+`fahim` red-orange leaves: stock L 30, C 33, h 45 → v2 L 14, C 16, h 40 → v3 L 14, C 15, h 40 → real Chromagraph L 22, C 36, h 41.
+
+Why `fahim` looks richer than v2 or v3: it is one of the few pairs where Chromagraph keeps warm chroma (reds/oranges ×1.27 against stock), while the weighted median over 8 pairs is ×0.66 and v2 already reproduces that held out. A LUT fitted to all pairs therefore cannot give `fahim` its own saturation. v2 also bakes a darker exposure than `fahim`'s Chromagraph render (leaves L 14 against 22), and CIELab chroma falls with lightness.
+
+User photos (median over each probe box, L*, a*, b*):
+
+| Photo | Probe | stock | v2 | v3 | v2 bright | v3 bright | v3 bright neutral |
+|---|---|---|---|---|---|---|---|
+| IMG_8693 | grey desk mat | L* 35, a* -0.2, b* +6.9 | L* 18, a* -1.2, b* +4.9 | L* 18, a* -1.6, b* +5.8 | L* 24, a* -1.4, b* +5.6 | L* 24, a* -1.9, b* +6.7 | L* 24, a* -1.4, b* +3.9 |
+| IMG_8693 | silver laptop | L* 99, a* -0.8, b* +0.2 | L* 88, a* -0.5, b* +12.0 | L* 88, a* -0.7, b* +11.8 | L* 88, a* -0.6, b* +7.6 | L* 88, a* -0.7, b* +7.5 | L* 88, a* -0.1, b* +1.1 |
+| IMG_8697 | grey desk mat | L* 28, a* +0.1, b* +6.9 | L* 13, a* -1.2, b* +4.6 | L* 13, a* -1.3, b* +5.0 | L* 18, a* -1.4, b* +5.3 | L* 18, a* -1.6, b* +5.8 | L* 18, a* -1.2, b* +3.5 |
+| IMG_8697 | silver laptop | L* 94, a* -1.4, b* +1.5 | L* 84, a* -0.1, b* +12.6 | L* 84, a* -0.5, b* +12.7 | L* 86, a* -0.4, b* +8.5 | L* 86, a* -0.6, b* +8.6 | L* 86, a* -0.2, b* +1.5 |
+
+## v3 changes
+
+### 1. Is chroma retention consistent across pairs?
+
+Real Chromagraph against stock, per fit pair, for stock pixels with C* > 20 and L* 15–85, excluding stock pixels with any channel ≥ 250. Each cell: chroma ratio (Chromagraph C* / stock C*), hue shift, ΔL*, pixels. Pooled = median over pairs weighted by pair weight (pairs with ≥ 300 pixels).
+
+| Pair | reds/oranges (15–60°) | yellows (70–95°) | greens (95–150°) |
+|---|---|---|---|
+| vsgfield | — (0) | ×0.32, -4°, ΔL -31 (1,058) | ×0.28, +6°, ΔL -26 (121) |
+| sliwex | ×0.31, -14°, ΔL -23 (55,080) | ×0.19, -23°, ΔL -27 (1,513) | ×0.22, -7°, ΔL -30 (945) |
+| fahim | ×1.27, -2°, ΔL -14 (13,989) | ×1.14, -14°, ΔL -20 (3,202) | ×0.97, -8°, ΔL -18 (13,609) |
+| aitree | ×0.62, +1°, ΔL -12 (77,153) | — (0) | — (0) |
+| robby | ×0.73, +7°, ΔL -17 (4,388) | ×0.94, -5°, ΔL -12 (297) | ×0.93, -8°, ΔL -12 (694) |
+| satoru | ×0.39, -3°, ΔL -15 (5,636) | ×0.62, -1°, ΔL -16 (1,495) | — (0) |
+| pallav | ×1.03, +6°, ΔL -13 (652) | ×1.06, -3°, ΔL -14 (1,115) | ×1.08, -14°, ΔL -13 (292) |
+| bencsinB | ×0.66, +3°, ΔL -3 (7,323) | ×0.76, +10°, ΔL -3 (5,477) | ×0.77, +10°, ΔL -4 (2,131) |
+| bencsinC | ×0.10, +14°, ΔL -14 (1,364) | — (4) | — (0) |
+| **pooled** | **×0.66, +3°, ΔL -14** (8 pairs) | **×0.62, -3°, ΔL -16** (6 pairs) | **×0.77, -8°, ΔL -12** (4 pairs) |
+
+**Where pairs disagree** (chroma ratio more than 0.25 from the pooled value, or hue shift more than 8° off): reds/oranges: `sliwex` ×0.31, -14° (night scene; Chromagraph much darker (author: both straight out of camera)); `fahim` ×1.27, -2° (Chromagraph shot deliberately underexposed by the author); `satoru` ×0.39, -3°; `pallav` ×1.03, +6°; `bencsinC` ×0.10, +14° | yellows: `vsgfield` ×0.32, -4° (same RAW, so not an exposure difference); `sliwex` ×0.19, -23° (night scene; Chromagraph much darker (author: both straight out of camera)); `fahim` ×1.14, -14° (Chromagraph shot deliberately underexposed by the author); `pallav` ×1.06, -3°; `bencsinB` ×0.76, +10° | greens: `sliwex` ×0.22, -7° (night scene; Chromagraph much darker (author: both straight out of camera)); `bencsinB` ×0.77, +10°. Likely reasons: the stock image is Apple's per-scene rendering, whose saturation boost and local tone mapping vary from scene to scene and form the denominator of the ratio; deliberate exposure differences change CIELab chroma along with lightness; and night or mixed light changes white balance between the two renders. The lowest warm ratios come from `sliwex` (Night street, parcel locker under LED and orange sodium light); `satoru` (Lake through a window; white railing posts, pale blue sky, dry grass); `bencsinC` (Dark hallway with warm cove lighting and a bright window at the end): there the reds/oranges are largely surfaces lit by warm light, whose orange cast Chromagraph neutralizes. That is a white-balance effect rather than object saturation, but it still pulls the pooled warm ratio down. Warm chroma is kept or raised only in `fahim`, `pallav`, so "darker but just as chromatic" is not consistent across these pairs.
+
+### 2. What v3 adds
+
+After the tone curve and before the 3D residual, v3 multiplies CIELab a*+ib* by a complex gain G(h): |G| is a chroma gain and arg G a hue rotation, both functions of hue. G is periodic and piecewise linear over 24 knots (15° apart), fitted by weighted linear least squares over all fit pairs with their weights (51,895 bin-balanced samples, near-clipped stock pixels excluded, Huber reweighting). It has a penalty on second differences around the hue circle (λ 2) and a weak pull toward G = 1 where a hue has little data (λ 0.05). It fades in between input C* 4 and 12, so neutrals are untouched and the neutral-axis constraint still applies. I chose this over refitting the residual in L*C*h: the observed effect is a per-hue chroma ratio and rotation, which a 24-parameter complex gain captures directly. The RBF residual, smoothed and averaged across pairs, had pulled warm chroma down; it is refitted on top of the gained colours. Chroma above 85% of the sRGB limit at the same L* and hue is rolled off with tanh, after the gain and again after the residual, so nothing is hard-clipped. The monotone-lightness projection, white anchor and neutral constraint follow as in v2.
+
+| Hue (after tone curve) | Chroma gain | Hue rotation | Data share within ±22.5° |
+|---|---|---|---|
+| reds/oranges (37°) | 0.68 | +7° | 57% |
+| yellows (82°) | 0.76 | +0° | 42% |
+| greens (122°) | 0.74 | -9° | 10% |
+| blue sky (220°) | 0.61 | -107° | 1% |
+| blues (270°) | 0.31 | -65° | 9% |
+| magentas (330°) | 0.41 | +53° | 3% |
+
+Plot: `diagnostics/hue_gain.png`. Share of lattice nodes with a channel at 0 or 1: v2 7.2%, v3 0.1%. Output L* still never drops when an input channel rises R 0.00% > 1, G 0.00% > 1, B 0.00% > 1.
+
+### 3. Held-out comparison
+
+| Held out | Identity | v2 | v3 | v3 − v2 median | v2 bright | v3 bright |
+|---|---|---|---|---|---|---|
+| vsgfield | 16.19 / 32.84 | 5.92 / 16.54 | 6.22 / 16.76 | +0.30 | 9.97 / 23.67 | 10.79 / 23.87 |
+| sliwex | 21.09 / 29.44 | 10.37 / 16.14 | 9.57 / 15.85 | -0.79 | 14.61 / 21.45 | 13.94 / 21.50 |
+| fahim | 14.65 / 19.28 | 6.12 / 10.24 | 6.15 / 10.96 | +0.03 | 7.64 / 14.54 | 7.70 / 14.55 |
+| aitree | 10.96 / 17.52 | 5.37 / 13.73 | 5.43 / 13.70 | +0.05 | 4.31 / 11.65 | 3.85 / 11.22 |
+| robby | 16.51 / 22.69 | 6.57 / 12.18 | 5.48 / 9.30 | -1.09 | 7.66 / 16.40 | 7.93 / 14.85 |
+| satoru | 20.62 / 26.81 | 6.61 / 15.03 | 5.84 / 15.43 | -0.78 | 9.59 / 21.24 | 8.95 / 21.35 |
+| pallav | 11.91 / 19.69 | 3.73 / 8.75 | 4.14 / 11.88 | +0.41 | 4.26 / 8.10 | 4.94 / 8.47 |
+| bencsinB | 6.80 / 10.83 | 10.96 / 19.63 | 10.52 / 19.51 | -0.44 | 6.46 / 13.79 | 6.19 / 13.87 |
+| bencsinC | 12.17 / 32.04 | 4.43 / 19.62 | 4.54 / 20.30 | +0.10 | 6.19 / 26.93 | 6.47 / 27.26 |
+| **mean** |  | 6.68 / 14.65 | 6.43 / 14.85 | -0.25 | 7.85 / 17.53 | 7.86 / 17.44 |
+
+Held-out chroma in the saturated sectors (median over held-out pairs, weighted; chroma ratio / hue shift against stock):
+
+| Sector | Pairs | Real Chromagraph | v2 | v3 |
+|---|---|---|---|---|
+| reds/oranges | 8 | ×0.66 / +3° | ×0.64 / -1° | ×0.64 / +1° |
+| yellows | 6 | ×0.61 / -3° | ×0.74 / -0° | ×0.74 / +2° |
+| greens | 4 | ×0.77 / -7° | ×0.77 / +4° | ×0.74 / -3° |
+
+Regions (in-sample: these pairs are in the fit; L*, C*, h):
+
+| Pair | Region | Stock | v2 | v3 | Real Chromagraph |
+|---|---|---|---|---|---|
+| fahim | red-orange leaves | L 30, C 33, h 45 | L 14, C 16, h 40 | L 14, C 15, h 40 | L 22, C 36, h 41 |
+| fahim | yellow chair | L 42, C 49, h 76 | L 23, C 30, h 79 | L 23, C 26, h 79 | L 27, C 43, h 55 |
+| fahim | green grass | L 44, C 38, h 107 | L 27, C 28, h 108 | L 27, C 26, h 107 | L 34, C 36, h 100 |
+| fahim | blue sky | L 76, C 8, h 255 | L 66, C 9, h 107 | L 67, C 10, h 106 | L 67, C 9, h 103 |
+| aitree | bright red leaves | L 36, C 56, h 38 | L 18, C 33, h 36 | L 18, C 31, h 34 | L 24, C 38, h 38 |
+| aitree | darker red leaves | L 22, C 33, h 30 | L 10, C 16, h 28 | L 9, C 13, h 26 | L 12, C 17, h 29 |
+| aitree | blue sky | L 81, C 23, h 275 | L 70, C 7, h 141 | L 70, C 9, h 128 | L 67, C 8, h 120 |
+| pallav | blue sky | L 67, C 26, h 274 | L 56, C 7, h 207 | L 56, C 9, h 215 | L 60, C 6, h 210 |
+| pallav | sunlit beige building | L 32, C 8, h 65 | L 15, C 5, h 74 | L 16, C 5, h 74 | L 16, C 6, h 56 |
+| pallav | red-brick building | L 41, C 8, h 48 | L 23, C 6, h 58 | L 24, C 7, h 59 | L 24, C 8, h 58 |
+| pallav | bridge | L 39, C 5, h 37 | L 21, C 4, h 63 | L 22, C 4, h 55 | L 31, C 7, h 57 |
+
+### 4. Files
+
+`chromagraph_v3_33.cube` (fitted exposure) and `chromagraph_v3_bright_33.cube` (the same 0.75-stop lift as v2 bright), plus `chromagraph_v3_bright_neutral_33.cube`, written by running `neutralize_lut.py` on the v3 bright LUT (it pulls a*/b* of near-neutral inputs to zero at fixed L*). Previews now show stock | v2 | v3 | real Chromagraph; the user photos show stock | v2 | v3 | v2 bright | v3 bright | v3 bright neutral.
+
+## v2 verdict (round 2)
 
 Averaged over all 9 held-out pairs, v2's CIEDE2000 is **6.68 median / 14.65 p95** against **7.42 / 15.63** for v1 (identity: 14.54 / 23.46). v2 has the lower median on 7 of 9 pairs. **v2 is closer to the real Chromagraph images than v1 on held-out pairs.** The brighter versions are deliberately further from the data: 7.85 (bright) and 11.35 (brighter).
 
 - **Fails identity:** on `bencsinB` (10.96 against 6.80 unchanged) v2 is further from the real Chromagraph image than the unchanged stock image.
 - **Flag:** `v2` changes the mean held-out median by -0.75 against `v1`; worse by more than 0.5 on sliwex.
-
-User photos (median over each probe box; stock → v1 → v2 → v2 bright → v2 brighter):
-
-| Photo | Probe | Stock | v1 | v2 | v2 bright | v2 brighter |
-|---|---|---|---|---|---|---|
-| IMG_8693 | grey desk mat | L* 35, a* -0.2, b* +6.9 | L* 13, a* -0.5, b* +6.3 | L* 18, a* -1.2, b* +4.9 | L* 24, a* -1.4, b* +5.6 | L* 31, a* -1.6, b* +6.3 |
-| IMG_8693 | silver laptop | L* 99, a* -0.8, b* +0.2 | L* 87, a* +0.9, b* +12.1 | L* 88, a* -0.5, b* +12.0 | L* 88, a* -0.6, b* +7.6 | L* 88, a* -0.4, b* +4.7 |
-| IMG_8697 | grey desk mat | L* 28, a* +0.1, b* +6.9 | L* 9, a* -1.2, b* +5.6 | L* 13, a* -1.2, b* +4.6 | L* 18, a* -1.4, b* +5.3 | L* 24, a* -1.6, b* +6.1 |
-| IMG_8697 | silver laptop | L* 94, a* -1.4, b* +1.5 | L* 85, a* +1.0, b* +13.8 | L* 84, a* -0.1, b* +12.6 | L* 86, a* -0.4, b* +8.5 | L* 87, a* -0.4, b* +5.5 |
 
 ## v2 changes
 
@@ -87,19 +174,19 @@ Evidence: real Chromagraph a*, b* of stock pixels with C* < 6, by stock L* (each
 
 Named neutral-white probes (median over the boxes in `diagnostics/probes_*.jpg`):
 
-| Pair | Probe | Stock | Real Chromagraph | v1 | v2 |
-|---|---|---|---|---|---|
-| robby | white structure (base container, right leg) | L* 31, a* +3.1, b* +8.2 | L* 24, a* +3.3, b* +7.8 (registered) | L* 11, a* +1.3, b* +6.0 | L* 15, a* +1.1, b* +5.6 |
-| satoru | white railing posts | L* 84, a* +13.1, b* +24.4 | L* 52, a* +5.2, b* +14.7 (registered) | L* 72, a* +8.0, b* +24.6 | L* 69, a* +4.7, b* +19.9 |
-| alli | cream wall | L* 84, a* +4.6, b* +13.8 | L* 72, a* +0.4, b* +20.6 (boxes placed in each frame) | L* 77, a* +3.8, b* +16.6 | L* 74, a* +1.5, b* +17.2 |
-| alli | skin (forehead) | L* 65, a* +22.9, b* +21.7 | L* 48, a* +15.7, b* +22.4 (boxes placed in each frame) | L* 49, a* +21.6, b* +25.1 | L* 51, a* +13.7, b* +18.4 |
-| bencsinB | white ceiling | L* 60, a* +3.4, b* +10.9 | L* 58, a* -1.6, b* +11.2 (registered) | L* 42, a* +7.1, b* +13.9 | L* 44, a* +2.6, b* +10.8 |
-| bencsinB | white window shades | L* 73, a* +3.1, b* +13.9 | L* 75, a* +0.2, b* +15.9 (registered) | L* 59, a* +4.2, b* +18.1 | L* 62, a* +1.2, b* +16.1 |
-| bencsinB | cream cushions | L* 87, a* +4.9, b* +19.7 | L* 83, a* +1.4, b* +16.4 (registered) | L* 79, a* +3.6, b* +19.6 | L* 76, a* +1.3, b* +18.3 |
-| bencsinC | window | L* 98, a* -0.3, b* +1.0 | L* 94, a* -1.5, b* +9.8 (registered) | L* 87, a* +1.3, b* +12.6 | L* 87, a* -0.4, b* +12.0 |
-| bencsinC | pale wall by window | L* 54, a* +2.2, b* +13.5 | L* 24, a* -0.3, b* +8.0 (registered) | L* 33, a* +6.5, b* +16.5 | L* 36, a* +2.2, b* +11.9 |
-| bencsinC | lit ceiling (orange in stock) | L* 9, a* +8.2, b* +12.1 | L* 2, a* +0.6, b* +2.0 (registered) | L* 4, a* +0.6, b* +4.2 | L* 4, a* +0.2, b* +4.2 |
-| bencsinA | white wall | L* 78, a* -0.3, b* +8.7 | n/a | L* 68, a* +1.5, b* +14.7 | L* 67, a* -0.5, b* +15.1 |
+| Pair | Probe | Stock | Real Chromagraph | v1 | v2 | v3 |
+|---|---|---|---|---|---|---|
+| robby | white structure (base container, right leg) | L* 31, a* +3.1, b* +8.2 | L* 24, a* +3.3, b* +7.8 (registered) | L* 11, a* +1.3, b* +6.0 | L* 15, a* +1.1, b* +5.6 | L* 15, a* +0.9, b* +5.8 |
+| satoru | white railing posts | L* 84, a* +13.1, b* +24.4 | L* 52, a* +5.2, b* +14.7 (registered) | L* 72, a* +8.0, b* +24.6 | L* 69, a* +4.7, b* +19.9 | L* 71, a* +4.1, b* +19.8 |
+| alli | cream wall | L* 84, a* +4.6, b* +13.8 | L* 72, a* +0.4, b* +20.6 (boxes placed in each frame) | L* 77, a* +3.8, b* +16.6 | L* 74, a* +1.5, b* +17.2 | L* 75, a* +1.4, b* +16.3 |
+| alli | skin (forehead) | L* 65, a* +22.9, b* +21.7 | L* 48, a* +15.7, b* +22.4 (boxes placed in each frame) | L* 49, a* +21.6, b* +25.1 | L* 51, a* +13.7, b* +18.4 | L* 49, a* +14.1, b* +18.3 |
+| bencsinB | white ceiling | L* 60, a* +3.4, b* +10.9 | L* 58, a* -1.6, b* +11.2 (registered) | L* 42, a* +7.1, b* +13.9 | L* 44, a* +2.6, b* +10.8 | L* 43, a* +2.7, b* +11.1 |
+| bencsinB | white window shades | L* 73, a* +3.1, b* +13.9 | L* 75, a* +0.2, b* +15.9 (registered) | L* 59, a* +4.2, b* +18.1 | L* 62, a* +1.2, b* +16.1 | L* 63, a* +1.0, b* +15.0 |
+| bencsinB | cream cushions | L* 87, a* +4.9, b* +19.7 | L* 83, a* +1.4, b* +16.4 (registered) | L* 79, a* +3.6, b* +19.6 | L* 76, a* +1.3, b* +18.3 | L* 77, a* +1.7, b* +18.0 |
+| bencsinC | window | L* 98, a* -0.3, b* +1.0 | L* 94, a* -1.5, b* +9.8 (registered) | L* 87, a* +1.3, b* +12.6 | L* 87, a* -0.4, b* +12.0 | L* 87, a* -0.5, b* +12.1 |
+| bencsinC | pale wall by window | L* 54, a* +2.2, b* +13.5 | L* 24, a* -0.3, b* +8.0 (registered) | L* 33, a* +6.5, b* +16.5 | L* 36, a* +2.2, b* +11.9 | L* 36, a* +2.0, b* +12.4 |
+| bencsinC | lit ceiling (orange in stock) | L* 9, a* +8.2, b* +12.1 | L* 2, a* +0.6, b* +2.0 (registered) | L* 4, a* +0.6, b* +4.2 | L* 4, a* +0.2, b* +4.2 | L* 4, a* +0.9, b* +3.8 |
+| bencsinA | white wall | L* 78, a* -0.3, b* +8.7 | n/a | L* 68, a* +1.5, b* +14.7 | L* 67, a* -0.5, b* +15.1 | L* 68, a* -0.9, b* +13.5 |
 
 Neutral inputs through each LUT (output a* / b* at input L*):
 

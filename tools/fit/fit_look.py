@@ -15,8 +15,10 @@ pairs.json (add pairs there; no code changes are needed). For every pair marked 
 5. validate every variant leave-one-pair-out with CIEDE2000, and
 6. write the .cube files, previews, a user-photo check and a Markdown report.
 
-Variants: v1 (as shipped: round-1 pairs, v1 method), each v2 change on its own, and v2 with all
-changes, plus two brighter renderings of v2. The images are untrusted data: they are only read
+Variants: v1 (as shipped: round-1 pairs, v1 method), each v2 change on its own, v2 with all
+changes, two brighter renderings of v2, and v3 = v2 plus a hue-dependent chroma gain and hue
+rotation (with soft gamut compression) and its bright rendering; with --neutralize-script the
+v3 bright LUT is also passed through that script. The images are untrusted data: they are only read
 through Path arguments. See report.md (written by this script) for the exact command used.
 """
 
@@ -27,6 +29,7 @@ import io
 import json
 import math
 import shlex
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -111,7 +114,16 @@ WHITE_STOCK_L = 97.0      # stock pixels at or above this L* count as "stock whi
 WHITE_MIN_PX = 50         # stock-white pixels a pair needs to vote on the white target
 WHITE_PCT = 99.9          # percentile of Chromagraph L* reported alongside
 WHITE_KNEE_L = 65.0       # white anchor leaves output below this L* unchanged
-BRIGHT = {"v2_bright": 0.75, "v2_brighter": 1.5}  # shadow lift (stops) at fixed white
+BRIGHT = {"v2_bright": ("v2", 0.75), "v2_brighter": ("v2", 1.5), "v3_bright": ("v3", 0.75)}  # (source, stops) at fixed white
+
+NEAR_CLIP = 250 / 255.0   # saturation analysis: drop stock pixels with any channel at or above this
+SAT_SECTORS = [("reds/oranges", 15.0, 60.0), ("yellows", 70.0, 95.0), ("greens", 95.0, 150.0)]
+SAT_C_MIN, SAT_L_RANGE = 20.0, (15.0, 85.0)
+N_HUE = 24                # v3 hue gain: periodic knots (15 degrees apart)
+HUE_C_LO, HUE_C_HI = 4.0, 12.0  # hue gain fades in between these input chromas (neutrals untouched)
+HUE_LAM_SMOOTH = 2.0      # penalty on second differences of the complex gain around the hue circle
+HUE_LAM_RIDGE = 0.05      # weak pull toward "no change" where a hue has little data
+GAMUT_KNEE = 0.85         # soft gamut compression starts at this share of the in-gamut chroma limit
 
 COVER_MIN = 5             # samples within one lattice step for a node to count as covered
 EVAL_MAX = 100000         # pixels per held-out pair for CIEDE2000
@@ -119,7 +131,7 @@ GAIN_SEARCH = np.arange(-4.0, 4.0 + 1e-9, 0.1)  # log2 exposure grid (exposure-m
 GAIN_SEARCH_PX = 10000
 
 PREVIEW_W = 1600
-USER_PANEL_W = 420
+USER_PANEL_W = 360
 USER_LONG = 1600
 PREVIEW_GAP = 6
 LABEL_H = 30
@@ -140,6 +152,7 @@ class Variant:
     neutral: bool
     white: bool
     white_L: float | None = None  # fixed white target instead of the measured one
+    lch: bool = False             # v3: hue-dependent chroma gain and rotation + soft gamut compression
 
 
 WHITE_ASKED_L = 93.0  # the user's estimate of the real white level; scored for comparison only
@@ -152,6 +165,7 @@ VARIANTS = [
     Variant("v2", "v2 (all three changes)", "all", True, True, True),
     Variant("w93", f"v2 with white at L* {WHITE_ASKED_L:g} instead of the measured level (comparison only)", "all",
             True, True, True, WHITE_ASKED_L),
+    Variant("v3", "v3: v2 + hue-dependent chroma gain and hue rotation", "all", True, True, True, lch=True),
 ]
 VARIANT = {v.key: v for v in VARIANTS}
 CUBES = {
@@ -159,10 +173,14 @@ CUBES = {
     "v2": ("chromagraph_v2_33.cube", "v2, fitted exposure (closest to the data)"),
     "v2_bright": ("chromagraph_v2_bright_33.cube", "v2 with shadows lifted 0.75 stop, white fixed"),
     "v2_brighter": ("chromagraph_v2_brighter_33.cube", "v2 with shadows lifted 1.5 stops, white fixed"),
+    "v3": ("chromagraph_v3_33.cube", "v3: v2 plus hue-dependent chroma gain and rotation, fitted exposure"),
+    "v3_bright": ("chromagraph_v3_bright_33.cube", "v3 with shadows lifted 0.75 stop, white fixed"),
 }
+NEUTRAL_CUBE = ("v3_bright_neutral", "chromagraph_v3_bright_neutral_33.cube", "Chromagraph approx v3 bright neutral")
 SHORT = {"identity": "identity", "tone": "tone curve (v2)", "v1": "v1", "data": "+data", "toe": "+toe",
          "neutral": "+neutral", "white": "+white", "v2": "v2", "v2_bright": "v2 bright", "v2_brighter": "v2 brighter",
-         "w93": f"v2, white {WHITE_ASKED_L:g}"}
+         "w93": f"v2, white {WHITE_ASKED_L:g}", "v3": "v3", "v3_bright": "v3 bright",
+         "v3_bright_neutral": "v3 bright neutral", "data_real": "real Chromagraph"}
 
 
 # ----------------------------------------------------------------------------- colour maths
@@ -182,6 +200,12 @@ LIN_TABLE = dec(np.arange(256) / 255.0).astype(np.float32)  # 8-bit sRGB code ->
 def enc_to_lab(s):
     xyz = colour.RGB_to_XYZ(dec(np.clip(s, 0.0, 1.0)), "sRGB")
     return colour.XYZ_to_Lab(xyz, WHITE)
+
+
+def enc_to_lab_raw(s):
+    """Like enc_to_lab but without clipping: out-of-range encoded values keep their sign and size."""
+    lin = np.sign(s) * dec(np.abs(s))
+    return colour.XYZ_to_Lab(colour.RGB_to_XYZ(lin, "sRGB"), WHITE)
 
 
 def lab_to_enc(lab):
@@ -284,6 +308,59 @@ class ToneCurve:
 
 
 @dataclass
+class HueGain:
+    """v3: complex gain G(h) = chroma gain x e^(i hue rotation) on CIELab a*+ib*, periodic
+    piecewise-linear in hue with N_HUE knots, faded in between HUE_C_LO and HUE_C_HI chroma."""
+    coeffs: np.ndarray        # complex, one per knot
+
+    def gain(self, h: np.ndarray) -> np.ndarray:
+        t = (np.mod(h, 2 * np.pi) / (2 * np.pi)) * N_HUE
+        j = np.floor(t).astype(np.int64) % N_HUE
+        f = t - np.floor(t)
+        return self.coeffs[j] * (1 - f) + self.coeffs[(j + 1) % N_HUE] * f
+
+    def apply_lab(self, lab: np.ndarray) -> np.ndarray:
+        z = lab[..., 1] + 1j * lab[..., 2]
+        s = hue_fade(np.abs(z))
+        z2 = z * (1 + s * (self.gain(np.angle(z)) - 1))
+        return np.stack([lab[..., 0], z2.real, z2.imag], axis=-1)
+
+    def apply_enc(self, u: np.ndarray) -> np.ndarray:
+        return lab_to_enc(soft_gamut(self.apply_lab(enc_to_lab(np.clip(u, 0.0, 1.0)))))
+
+
+def hue_fade(C: np.ndarray) -> np.ndarray:
+    t = np.clip((C - HUE_C_LO) / (HUE_C_HI - HUE_C_LO), 0.0, 1.0)
+    return t * t * (3 - 2 * t)
+
+
+def max_chroma(L: np.ndarray, h: np.ndarray, iters: int = 22) -> np.ndarray:
+    """Largest in-gamut sRGB chroma at each CIELab lightness and hue (bisection)."""
+    lo, hi = np.zeros_like(L), np.full_like(L, 180.0)
+    ch, sh = np.cos(h), np.sin(h)
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        lin = colour.XYZ_to_RGB(colour.Lab_to_XYZ(np.stack([L, mid * ch, mid * sh], axis=-1), WHITE), "sRGB")
+        ok = np.all((lin >= -1e-6) & (lin <= 1 + 1e-6), axis=-1)
+        lo, hi = np.where(ok, mid, lo), np.where(ok, hi, mid)
+    return lo
+
+
+def soft_gamut(lab: np.ndarray) -> np.ndarray:
+    """Soft gamut compression at constant L* and hue: chroma above GAMUT_KNEE x the sRGB limit is
+    rolled off with tanh so it approaches but never passes the limit (no hard-clip hue shifts)."""
+    L = np.clip(lab[..., 0], 0.0, 100.0)
+    a, b = lab[..., 1], lab[..., 2]
+    C, h = np.hypot(a, b), np.arctan2(b, a)
+    cm = max_chroma(L, h)
+    k = GAMUT_KNEE * cm
+    span = np.maximum(cm - k, 1e-6)
+    cn = np.where(C > k, k + span * np.tanh((C - k) / span), C)
+    scale = np.where(C > 1e-9, cn / np.maximum(C, 1e-9), 1.0)
+    return np.stack([L, a * scale, b * scale], axis=-1)
+
+
+@dataclass
 class LookModel:
     curve: ToneCurve
     log2_gains: dict          # pair name -> log2 exposure gain (anchor pair = 0)
@@ -291,6 +368,8 @@ class LookModel:
     n_rbf_centres: int = 0
     support: list = field(default_factory=list)  # near-neutral evidence by input L* bin
     white: dict = field(default_factory=dict)    # highlight levels and white target
+    hue_gain: HueGain | None = None              # v3 only
+    hue_info: dict = field(default_factory=dict)
     _baked: dict = field(default_factory=dict, repr=False)
 
     def median_gain(self) -> float:
@@ -302,7 +381,11 @@ class LookModel:
         if key not in self._baked:
             s = lattice(size).reshape(-1, 3)
             u = self.curve(np.log2(np.maximum(dec(s), TINY)) + log2_gain)
+            if residual and self.hue_gain is not None:
+                u = self.hue_gain.apply_enc(u)  # v3: after the tone curve, before the 3D residual
             out = u + self.rbf(np.clip(u, 0.0, 1.0)) if (residual and self.rbf is not None) else u
+            if residual and self.hue_gain is not None:
+                out = lab_to_enc(soft_gamut(enc_to_lab_raw(out)))  # compress, don't clip, overshoot
             out = np.clip(out, 0.0, 1.0).reshape(size, size, size, 3)
             if residual and project:
                 out = monotone_lightness(out)
@@ -883,7 +966,94 @@ def white_level(pairs: list[PairData]) -> dict:
     return {"levels": levels, "percentile": pct, "n_px": n_px, "voters": list(voters), "target_L": target}
 
 
-def fit_look(pairs: list[PairData], toe: bool) -> LookModel:
+def near_clip_mask(pr: PairData) -> np.ndarray:
+    """Stock pixels with any channel at or above NEAR_CLIP (Apple clips hyper-saturated colours)."""
+    return np.any(enc(np.clip(pr.x0, 0, 1)) >= NEAR_CLIP, axis=-1) | np.any(enc(np.clip(pr.x, 0, 1)) >= NEAR_CLIP, axis=-1)
+
+
+def fit_hue_gain(pairs: list[PairData], curve: ToneCurve, gains: dict) -> tuple[HueGain, dict]:
+    """Fit the complex hue gain G(h) so that a*+ib* after the tone curve, times G, matches the
+    real Chromagraph a*+ib* (weighted linear least squares with Huber IRLS, a periodic smoothness
+    penalty and a weak pull toward G = 1). Near-clipped stock pixels are left out."""
+    rng = np.random.default_rng(SEED + 7)
+    Zu, Zy, W = [], [], []
+    for pr in pairs:
+        m = pr.valid & ~near_clip_mask(pr)
+        xv, yv = pr.x[m], pr.y[m]
+        if len(xv) == 0:
+            continue
+        sel = balanced_indices(enc(np.clip(xv, 0, 1)), rng, BAL_BINS, BAL_CAP, STAGE1_MAX)
+        u = curve(np.log2(np.maximum(xv[sel], TINY)) + gains[pr.name])
+        lu, ly = enc_to_lab(np.clip(u, 0, 1)), enc_to_lab(enc(np.clip(yv[sel], 0, 1)))
+        zu, zy = lu[:, 1] + 1j * lu[:, 2], ly[:, 1] + 1j * ly[:, 2]
+        w = pr.weight * hue_fade(np.abs(zu))
+        keep = w > 0
+        Zu.append(zu[keep])
+        Zy.append(zy[keep])
+        W.append(w[keep])
+    zu, zy, w = np.concatenate(Zu), np.concatenate(Zy), np.concatenate(W)
+    t = (np.mod(np.angle(zu), 2 * np.pi) / (2 * np.pi)) * N_HUE
+    j = np.floor(t).astype(np.int64) % N_HUE
+    f = t - np.floor(t)
+    A = np.zeros((len(zu), N_HUE), dtype=complex)
+    A[np.arange(len(zu)), j] += zu * (1 - f)
+    A[np.arange(len(zu)), (j + 1) % N_HUE] += zu * f
+    eye = np.eye(N_HUE)
+    D2 = -2 * eye + np.roll(eye, 1, axis=1) + np.roll(eye, -1, axis=1)
+    P = HUE_LAM_SMOOTH * D2.T @ D2 + HUE_LAM_RIDGE * eye
+    hub = np.ones_like(w)
+    for _ in range(4):
+        ww = w * hub
+        M = (A.conj().T * ww) @ A / ww.sum() + P
+        rhs = A.conj().T @ (ww * zy) / ww.sum() + HUE_LAM_RIDGE * np.ones(N_HUE)
+        c = np.linalg.solve(M, rhs)
+        r = np.abs(A @ c - zy)
+        cut = HUBER_K * max(1.4826 * float(np.median(r)), 0.5)
+        hub = np.minimum(1.0, cut / np.maximum(r, 1e-9))
+    mass = np.abs(A.conj().T * (w * hub)) @ np.ones(len(zu))  # data weight near each knot
+    return HueGain(coeffs=c), {"mass": (mass / mass.sum()).tolist(), "n": int(len(zu))}
+
+
+def sector_stats(stock_enc: np.ndarray, outputs: dict) -> dict:
+    """Per saturated hue sector (stock C* > SAT_C_MIN, L* in SAT_L_RANGE): median chroma ratio,
+    hue shift and lightness change of each output against the stock pixels."""
+    li = enc_to_lab(stock_enc)
+    Ci, hi_ = np.hypot(li[:, 1], li[:, 2]), np.degrees(np.arctan2(li[:, 2], li[:, 1])) % 360
+    base = (Ci > SAT_C_MIN) & (li[:, 0] >= SAT_L_RANGE[0]) & (li[:, 0] <= SAT_L_RANGE[1])
+    labs = {k: enc_to_lab(o) for k, o in outputs.items()}
+    res = {}
+    for name, lo, hi in SAT_SECTORS:
+        m = base & (hi_ >= lo) & (hi_ < hi)
+        row = {"n": int(m.sum())}
+        if m.sum() >= 50:
+            for k, lab in labs.items():
+                Co = np.hypot(lab[m, 1], lab[m, 2])
+                ho = np.degrees(np.arctan2(lab[m, 2], lab[m, 1])) % 360
+                row[k] = {"ratio": float(np.median(Co / Ci[m])), "dh": float(np.median(wrap(ho - hi_[m]))),
+                          "dL": float(np.median(lab[m, 0] - li[m, 0])), "C_in": float(np.median(Ci[m])),
+                          "C_out": float(np.median(Co))}
+        res[name] = row
+    return res
+
+
+def saturation_consistency(pairs: list[PairData]) -> dict:
+    """Task-1 table: real Chromagraph vs stock in saturated hue sectors, per fit pair."""
+    rng = np.random.default_rng(SEED + 8)
+    out = {}
+    for pr in pairs:
+        m = pr.valid & ~near_clip_mask(pr)
+        x, y = sample_pixels(pr, m, rng, 150000)
+        out[pr.name] = sector_stats(enc(np.clip(x, 0, 1)), {"data": enc(np.clip(y, 0, 1))})
+    pooled = {}
+    for name, _, _ in SAT_SECTORS:
+        rows = [(p.weight, out[p.name][name]["data"]) for p in pairs if "data" in out[p.name][name] and out[p.name][name]["n"] >= 300]
+        if rows:
+            w = [r[0] for r in rows]
+            pooled[name] = {k: wmedian([r[1][k] for r in rows], w) for k in ("ratio", "dh", "dL")} | {"pairs": len(rows)}
+    return {"per_pair": out, "pooled": pooled}
+
+
+def fit_look(pairs: list[PairData], toe: bool, lch: bool = False) -> LookModel:
     rng = np.random.default_rng(SEED)
     # Stage 1: neutral tone curve + exposure gains, fitted on luminance (so hue-specific
     # channel shifts such as blue skies turning cream do not bend the neutral curve),
@@ -909,12 +1079,17 @@ def fit_look(pairs: list[PairData], toe: bool) -> LookModel:
                               None if np.all(base_w == 1.0) else base_w)
     gains = {pr.name: float(gi) for pr, gi in zip(pairs, g)}
 
+    # v3: hue-dependent chroma gain and rotation after the tone curve (see fit_hue_gain).
+    hue_gain, hue_info = fit_hue_gain(pairs, curve, gains) if lch else (None, {})
+
     # Stage 2: smooth 3D residual on bin aggregates (balances large flat regions).
     U, D = [], []
     for pr in pairs:
         xv, yv = pr.x[pr.valid], pr.y[pr.valid]
         sel = rng.choice(len(xv), min(len(xv), int(round(STAGE2_MAX * pr.weight))), replace=False)
         u = curve(np.log2(np.maximum(xv[sel], TINY)) + gains[pr.name])
+        if hue_gain is not None:
+            u = hue_gain.apply_enc(u)
         U.append(u)
         D.append(enc(np.clip(yv[sel], 0, 1)) - u)
     U, D = np.clip(np.concatenate(U), 0.0, 1.0), np.concatenate(D)
@@ -934,8 +1109,8 @@ def fit_look(pairs: list[PairData], toe: bool) -> LookModel:
     cu, cd, cn = np.asarray(cu), np.asarray(cd), np.asarray(cn, dtype=np.float64)
     smoothing = RBF_SMOOTH * RBF_REF_COUNT / np.minimum(cn, RBF_REF_COUNT)
     rbf = RBFInterpolator(cu, cd, kernel="gaussian", epsilon=1.0 / RBF_WIDTH, degree=-1, smoothing=smoothing)
-    return LookModel(curve=curve, log2_gains=gains, rbf=rbf, n_rbf_centres=len(cu),
-                     support=neutral_support(pairs), white=white_level(pairs))
+    return LookModel(curve=curve, log2_gains=gains, rbf=rbf, n_rbf_centres=len(cu), support=neutral_support(pairs),
+                     white=white_level(pairs), hue_gain=hue_gain, hue_info=hue_info)
 
 
 def lattice_coverage(model: LookModel, pairs: list[PairData]) -> dict:
@@ -1097,7 +1272,8 @@ def measure_pair_probes(spec: PairSpec, stock: Decoded, chroma: Decoded, reg: Re
         return results
     for pr in spec.probes:
         S = box_pixels(stock.srgb8, pr["boxes"]) / 255.0
-        row = {"pair": spec.name, "probe": pr["name"], "stock": lab_median(S), "chroma": None, "how": ""}
+        row = {"pair": spec.name, "probe": pr["name"], "kind": pr.get("kind", "neutral"), "stock": lab_median(S),
+               "chroma": None, "how": ""}
         if pr.get("chroma_boxes"):
             row["chroma"] = lab_median(box_pixels(chroma.srgb8, pr["chroma_boxes"]) / 255.0)
             row["how"] = "boxes placed in each frame"
@@ -1150,8 +1326,9 @@ def run_user_tests(cfg_path: Path, photo_dir: Path, luts: dict, out_dir: Path) -
     return results
 
 
-USER_LABELS = {"v1": "v1", "v2": "v2 (fitted exposure)", "v2_bright": "v2 bright (+0.75 stop)",
-               "v2_brighter": "v2 brighter (+1.5 stop)"}
+USER_LABELS = {"v1": "v1", "v2": "v2", "v3": "v3", "v2_bright": "v2 bright (+0.75 stop)",
+               "v2_brighter": "v2 brighter (+1.5 stop)", "v3_bright": "v3 bright (+0.75 stop)",
+               "v3_bright_neutral": "v3 bright neutral"}
 
 
 # ----------------------------------------------------------------------------- look description
@@ -1240,6 +1417,234 @@ def ramp_L(lut: np.ndarray, levels) -> list:
     return [float(v) for v in enc_to_lab(apply_lut(lut, np.repeat(g[:, None], 3, axis=1)))[:, 0]]
 
 
+def plot_hue_gain(model: LookModel, path: Path) -> None:
+    hg = model.hue_gain
+    h = np.linspace(0, 2 * np.pi, 361)
+    G = hg.gain(h)
+    deg = np.degrees(h)
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(6.5, 5.0), dpi=110, sharex=True)
+    a1.plot(deg, np.abs(G), color="k")
+    a1.axhline(1.0, color="0.6", ls="--", lw=1)
+    a1.set_ylabel("chroma gain")
+    a2.plot(deg, np.degrees(np.angle(G)), color="k")
+    a2.axhline(0.0, color="0.6", ls="--", lw=1)
+    a2.set_ylabel("hue rotation (deg)")
+    a2.set_xlabel("CIELab hue after the tone curve (deg)")
+    mass = np.asarray(model.hue_info.get("mass", []))
+    if mass.size:
+        ax3 = a1.twinx()
+        ax3.bar(np.arange(N_HUE) * 360 / N_HUE, mass, width=360 / N_HUE * 0.8, alpha=0.2, color="tab:blue")
+        ax3.set_ylabel("data share", color="tab:blue")
+    for name, lo, hi in SAT_SECTORS:
+        for ax in (a1, a2):
+            ax.axvspan(lo, hi, alpha=0.08, color="orange")
+    a1.set_title("v3 hue gain (shaded: sectors in the saturation table)")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+
+
+def lch(v: dict | None) -> dict | None:
+    if v is None:
+        return None
+    return {"L": v["L"], "C": float(math.hypot(v["a"], v["b"])), "h": float(math.degrees(math.atan2(v["b"], v["a"])) % 360)}
+
+
+def lch_str(v: dict | None) -> str:
+    return "n/a" if v is None else f"L {v['L']:.0f}, C {v['C']:.0f}, h {v['h']:.0f}"
+
+
+def build_v3_context(c: dict, models: dict, luts: dict, loo: dict, probes: list, consistency: dict, spec_by: dict) -> dict:
+    held = list(loo)
+    mean = {k: {s: float(np.mean([loo[h]["valid"][k][s] for h in held])) for s in ("median", "p95")}
+            for k in ("v2", "v3", "v3_bright", "v2_bright")}
+    worse = [h for h in held if loo[h]["valid"]["v3"]["median"] - loo[h]["valid"]["v2"]["median"] > 0.5]
+    wins = sum(loo[h]["valid"]["v3"]["median"] < loo[h]["valid"]["v2"]["median"] for h in held)
+    sect = {}
+    for name, _, _ in SAT_SECTORS:
+        rows = [(spec_by[h].weight, loo[h]["sectors"][name]) for h in held
+                if loo[h]["sectors"][name]["n"] >= 300 and "data" in loo[h]["sectors"][name]]
+        if rows:
+            w = [r[0] for r in rows]
+            sect[name] = {k: {m: wmedian([r[1][k][m] for r in rows], w) for m in ("ratio", "dh", "dL")} for k in ("data", "v2", "v3")}
+            sect[name]["pairs"] = len(rows)
+    regions = []
+    for p in probes:
+        if p["kind"] == "colour":
+            regions.append({"pair": p["pair"], "probe": p["probe"], "stock": lch(p["stock"]), "v2": lch(p["luts"]["v2"]),
+                            "v3": lch(p["luts"]["v3"]), "real": lch(p["chroma"])})
+    hg = models["v3"].hue_gain
+    centres = {"reds/oranges (37°)": 37.5, "yellows (82°)": 82.5, "greens (122°)": 122.5, "blue sky (220°)": 220.0,
+               "blues (270°)": 270.0, "magentas (330°)": 330.0}
+    G = {k: hg.gain(np.radians(v)) for k, v in centres.items()}
+    mass = np.asarray(models["v3"].hue_info["mass"])
+    knot_deg = np.arange(N_HUE) * 360 / N_HUE
+
+    def share(deg):
+        d = np.abs(wrap(knot_deg - deg))
+        return float(mass[d <= 22.5].sum())
+
+    gain_rows = [[k, f"{abs(g):.2f}", f"{math.degrees(np.angle(g)):+.0f}°", f"{share(centres[k]):.0%}"] for k, g in G.items()]
+
+    def at_edge(lut):
+        return float(np.mean(np.any((lut <= 1e-4) | (lut >= 1 - 1e-4), axis=-1)))
+
+    lut_edges = {k: at_edge(luts[k]) for k in ("v2", "v3")}
+
+    notes = []
+    for name, _, _ in SAT_SECTORS:
+        pool = consistency["pooled"].get(name)
+        if not pool:
+            continue
+        off = []
+        for pair, secs in consistency["per_pair"].items():
+            s = secs[name]
+            if "data" not in s or s["n"] < 300:
+                continue
+            d = s["data"]
+            if abs(d["ratio"] - pool["ratio"]) > 0.25 or abs(float(wrap(np.array(d["dh"] - pool["dh"])))) > 8:
+                sp = spec_by[pair]
+                why = ([sp.deliberate_exposure] if sp.deliberate_exposure else []) + \
+                      (["same RAW, so not an exposure difference"] if sp.same_exposure else [])
+                off.append(f"`{pair}` ×{d['ratio']:.2f}, {d['dh']:+.0f}°" + (f" ({'; '.join(why)})" if why else ""))
+        if off:
+            notes.append(f"{name}: " + "; ".join(off))
+    warm = SAT_SECTORS[0][0]
+    low = [p for p, s in consistency["per_pair"].items() if "data" in s[warm] and s[warm]["n"] >= 300 and s[warm]["data"]["ratio"] < 0.5]
+    keep = [p for p, s in consistency["per_pair"].items() if "data" in s[warm] and s[warm]["n"] >= 300 and s[warm]["data"]["ratio"] >= 0.95]
+    disagreement = (
+        ("**Where pairs disagree** (chroma ratio more than 0.25 from the pooled value, or hue shift more than 8° off): "
+         + " | ".join(notes) + ". Likely reasons: the stock image is Apple's per-scene rendering, whose saturation boost and "
+         "local tone mapping vary from scene to scene and form the denominator of the ratio; deliberate exposure differences "
+         "change CIELab chroma along with lightness; and night or mixed light changes white balance between the two renders.")
+        if notes else "All pairs agree within 0.25 in chroma ratio and 8° in hue shift.")
+    if low:
+        disagreement += (" The lowest warm ratios come from "
+                         + "; ".join(f"`{p}` ({spec_by[p].scene})" for p in low)
+                         + ": there the reds/oranges are largely surfaces lit by warm light, whose orange cast Chromagraph "
+                         "neutralizes. That is a white-balance effect rather than object saturation, but it still pulls the "
+                         "pooled warm ratio down.")
+    if keep:
+        disagreement += (" Warm chroma is kept or raised only in " + ", ".join(f"`{p}`" for p in keep)
+                         + ", so \"darker but just as chromatic\" is not consistent across these pairs.")
+    c["v3_disagreement"] = disagreement
+    return {"v3": {"mean": mean, "worse": worse, "wins": wins, "held": held, "sectors": sect, "regions": regions,
+                   "consistency": consistency, "gain_rows": gain_rows, "edges": lut_edges,
+                   "neutral_cube": "v3_bright_neutral" in luts, "n_hue": models["v3"].hue_info.get("n", 0),
+                   "smooth": lut_smoothness(luts["v3"])}}
+
+
+def write_v3_sections(L: list, c: dict) -> None:
+    v3 = c["v3"]
+    m, held, loo = v3["mean"], v3["held"], c["loo"]
+    better = m["v3"]["median"] < m["v2"]["median"]
+    L.append("## v3 verdict (round 3: saturated colours)\n")
+    L.append(f"Averaged over all {len(held)} held-out pairs, v3 scores **{m['v3']['median']:.2f} median / {m['v3']['p95']:.2f} p95** "
+             f"CIEDE2000 against **{m['v2']['median']:.2f} / {m['v2']['p95']:.2f}** for v2, with the lower median on {v3['wins']} of "
+             f"{len(held)} pairs. "
+             + ("**v3 beats v2 on the mean held-out median.**" if better else
+                "**v3 does not beat v2 on the mean held-out median, so v3 ships only as an optional \"rich\" variant; v2 stays "
+                "the reference LUT.**")
+             + (f" v3 is worse than v2 by more than 0.5 on {', '.join(v3['worse'])}." if v3["worse"] else "") + "\n")
+    leaf = next((r for r in v3["regions"] if r["pair"] == "fahim" and "leaves" in r["probe"]), None)
+    if leaf:
+        L.append(f"`fahim` red-orange leaves: stock {lch_str(leaf['stock'])} → v2 {lch_str(leaf['v2'])} → v3 "
+                 f"{lch_str(leaf['v3'])} → real Chromagraph {lch_str(leaf['real'])}.\n")
+        cons = v3["consistency"]
+        warm = SAT_SECTORS[0][0]
+        fr = cons["per_pair"].get("fahim", {}).get(warm, {}).get("data")
+        pool = cons["pooled"].get(warm)
+        if fr and pool:
+            L.append(
+                f"Why `fahim` looks richer than v2 or v3: it is one of the few pairs where Chromagraph keeps warm chroma "
+                f"(reds/oranges ×{fr['ratio']:.2f} against stock), while the weighted median over {pool['pairs']} pairs is "
+                f"×{pool['ratio']:.2f} and v2 already reproduces that held out. A LUT fitted to all pairs therefore cannot "
+                f"give `fahim` its own saturation. v2 also bakes a darker exposure than `fahim`'s Chromagraph render "
+                f"(leaves L {leaf['v2']['L']:.0f} against {leaf['real']['L']:.0f}), and CIELab chroma falls with lightness.\n")
+    if c["user"]:
+        L.append("User photos (median over each probe box, L*, a*, b*):\n")
+        keys = [k for k in ("stock", "v2", "v3", "v2_bright", "v3_bright", "v3_bright_neutral") if k in c["user"][0]["probes"][0]["values"]]
+        rows = []
+        for u in c["user"]:
+            for p in u["probes"]:
+                rows.append([u["name"], p["probe"]] + [lab_str(p["values"][k]) for k in keys])
+        L.append(table(["Photo", "Probe"] + [SHORT.get(k, k) for k in keys], rows))
+        L.append("")
+
+    L.append("## v3 changes\n")
+    L.append("### 1. Is chroma retention consistent across pairs?\n")
+    L.append(f"Real Chromagraph against stock, per fit pair, for stock pixels with C* > {SAT_C_MIN:g} and L* "
+             f"{SAT_L_RANGE[0]:g}–{SAT_L_RANGE[1]:g}, excluding stock pixels with any channel ≥ 250. Each cell: chroma ratio "
+             "(Chromagraph C* / stock C*), hue shift, ΔL*, pixels. Pooled = median over pairs weighted by pair weight "
+             "(pairs with ≥ 300 pixels).\n")
+    cons = v3["consistency"]
+    rows = []
+    for pair, secs in cons["per_pair"].items():
+        cells = []
+        for name, _, _ in SAT_SECTORS:
+            s = secs[name]
+            cells.append(f"×{s['data']['ratio']:.2f}, {s['data']['dh']:+.0f}°, ΔL {s['data']['dL']:+.0f} ({s['n']:,})"
+                         if "data" in s else f"— ({s['n']:,})")
+        rows.append([pair] + cells)
+    rows.append(["**pooled**"] + [f"**×{cons['pooled'][n]['ratio']:.2f}, {cons['pooled'][n]['dh']:+.0f}°, ΔL "
+                                  f"{cons['pooled'][n]['dL']:+.0f}** ({cons['pooled'][n]['pairs']} pairs)" if n in cons["pooled"] else "—"
+                                  for n, _, _ in SAT_SECTORS])
+    L.append(table(["Pair"] + [f"{n} ({lo:g}–{hi:g}°)" for n, lo, hi in SAT_SECTORS], rows))
+    L.append("")
+    L.append(c["v3_disagreement"] + "\n")
+
+    L.append("### 2. What v3 adds\n")
+    L.append(
+        "After the tone curve and before the 3D residual, v3 multiplies CIELab a*+ib* by a complex gain G(h): |G| is a "
+        "chroma gain and arg G a hue rotation, both functions of hue. G is periodic and piecewise linear over "
+        f"{N_HUE} knots (15° apart), fitted by weighted linear least squares over all fit pairs with their weights "
+        f"({v3['n_hue']:,} bin-balanced samples, near-clipped stock pixels excluded, Huber reweighting). It has a penalty on "
+        f"second differences around the hue circle (λ {HUE_LAM_SMOOTH:g}) and a weak pull toward G = 1 where a hue has "
+        f"little data (λ {HUE_LAM_RIDGE:g}). It fades in between input C* {HUE_C_LO:g} and {HUE_C_HI:g}, so neutrals are "
+        "untouched and the neutral-axis constraint still applies. I chose this over refitting the residual in L*C*h: the "
+        "observed effect is a per-hue chroma ratio and rotation, which a 24-parameter complex gain captures directly. "
+        "The RBF residual, smoothed and averaged across pairs, had pulled warm chroma down; it is refitted on top of the "
+        "gained colours. Chroma above "
+        f"{GAMUT_KNEE:.0%} of the sRGB limit at the same L* and hue is rolled off with tanh, after the gain and again "
+        "after the residual, so nothing is hard-clipped. The monotone-lightness projection, white anchor and neutral "
+        "constraint follow as in v2.\n")
+    L.append(table(["Hue (after tone curve)", "Chroma gain", "Hue rotation", "Data share within ±22.5°"], v3["gain_rows"]))
+    e = v3["edges"]
+    sm = v3["smooth"]
+    L.append(f"\nPlot: `diagnostics/hue_gain.png`. Share of lattice nodes with a channel at 0 or 1: v2 {e['v2']:.1%}, v3 "
+             f"{e['v3']:.1%}. Output L* still never drops when an input channel rises "
+             + ", ".join(f"{k} {v['drop_gt1']:.2%} > 1" for k, v in sm.items()) + ".\n")
+
+    L.append("### 3. Held-out comparison\n")
+    rows = []
+    for h in held:
+        v = loo[h]["valid"]
+        rows.append([h, mp(v["identity"]), mp(v["v2"]), mp(v["v3"]), f"{v['v3']['median'] - v['v2']['median']:+.2f}",
+                     mp(v["v2_bright"]), mp(v["v3_bright"])])
+    rows.append(["**mean**", "", f"{m['v2']['median']:.2f} / {m['v2']['p95']:.2f}", f"{m['v3']['median']:.2f} / {m['v3']['p95']:.2f}",
+                 f"{m['v3']['median'] - m['v2']['median']:+.2f}", f"{m['v2_bright']['median']:.2f} / {m['v2_bright']['p95']:.2f}",
+                 f"{m['v3_bright']['median']:.2f} / {m['v3_bright']['p95']:.2f}"])
+    L.append(table(["Held out", "Identity", "v2", "v3", "v3 − v2 median", "v2 bright", "v3 bright"], rows))
+    L.append("\nHeld-out chroma in the saturated sectors (median over held-out pairs, weighted; chroma ratio / hue shift against stock):\n")
+    rows = []
+    for name, _, _ in SAT_SECTORS:
+        s = v3["sectors"].get(name)
+        if s:
+            rows.append([name, str(s["pairs"])] + [f"×{s[k]['ratio']:.2f} / {s[k]['dh']:+.0f}°" for k in ("data", "v2", "v3")])
+    L.append(table(["Sector", "Pairs", "Real Chromagraph", "v2", "v3"], rows))
+    L.append("\nRegions (in-sample: these pairs are in the fit; L*, C*, h):\n")
+    rows = [[r["pair"], r["probe"], lch_str(r["stock"]), lch_str(r["v2"]), lch_str(r["v3"]), lch_str(r["real"])] for r in v3["regions"]]
+    L.append(table(["Pair", "Region", "Stock", "v2", "v3", "Real Chromagraph"], rows))
+    L.append("")
+    L.append("### 4. Files\n")
+    L.append("`chromagraph_v3_33.cube` (fitted exposure) and `chromagraph_v3_bright_33.cube` (the same 0.75-stop lift as v2 bright)"
+             + (", plus `chromagraph_v3_bright_neutral_33.cube`, written by running `neutralize_lut.py` on the v3 bright LUT "
+                "(it pulls a*/b* of near-neutral inputs to zero at fixed L*)" if v3["neutral_cube"] else
+                "; `chromagraph_v3_bright_neutral_33.cube` was not written because `--neutralize-script` was not given")
+             + ". Previews now show stock | v2 | v3 | real Chromagraph; the user photos show stock | v2 | v3 | v2 bright | v3 bright"
+             + (" | v3 bright neutral" if v3["neutral_cube"] else "") + ".\n")
+
+
 def plot_tone_curves(models: dict, pairs: list[PairData], path: Path) -> None:
     rng = np.random.default_rng(SEED + 5)
     ref = models["v2"]
@@ -1285,6 +1690,8 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--user-photos-dir", type=Path, default=None,
                     help="folder with the user's own photos (visual check only; never used for fitting)")
     ap.add_argument("--user-photos", type=Path, default=here / "user_photos.json")
+    ap.add_argument("--neutralize-script", type=Path, default=None,
+                    help="neutralize_lut.py; when given, writes chromagraph_v3_bright_neutral_33.cube from the v3 bright LUT")
     return ap.parse_args()
 
 
@@ -1310,20 +1717,20 @@ def main() -> int:
     anchor = fit_names[0]
     cache: dict = {}
 
-    def get_model(names: list[str], toe: bool) -> LookModel:
-        key = (tuple(names), toe)
+    def get_model(names: list[str], toe: bool, lch: bool = False) -> LookModel:
+        key = (tuple(names), toe, lch)
         if key not in cache:
             t = time.time()
-            cache[key] = fit_look([pdata[n] for n in names], toe)
-            log(f"[fit] {len(names)} pairs, toe={toe}: {time.time() - t:.1f}s")
+            cache[key] = fit_look([pdata[n] for n in names], toe, lch)
+            log(f"[fit] {len(names)} pairs, toe={toe}, lch={lch}: {time.time() - t:.1f}s")
         return cache[key]
 
     # ---- final models and LUTs
-    models = {v.key: get_model(sets[v.data], v.toe) for v in VARIANTS}
+    models = {v.key: get_model(sets[v.data], v.toe, v.lch) for v in VARIANTS}
     luts = {v.key: models[v.key].bake_variant(v) for v in VARIANTS}
-    luts.update({k: brighten(luts["v2"], st) for k, st in BRIGHT.items()})
+    luts.update({k: brighten(luts[src], st) for k, (src, st) in BRIGHT.items()})
     for key, (fname, desc) in CUBES.items():
-        m = models["v1" if key == "v1" else "v2"]
+        m = models[key.split("_")[0]]
         gm_rel = m.median_gain() - m.log2_gains[next(iter(m.log2_gains))]
         comments = [
             f"Approximate Chromagraph film-print look, {desc}.",
@@ -1341,27 +1748,40 @@ def main() -> int:
             sys.exit(f"cube round-trip mismatch for {fname}")
         luts[key] = back
         log(f"[lut] wrote {out_dir / fname}")
+    if args.neutralize_script is not None:
+        key, fname, title = NEUTRAL_CUBE
+        cmd = [sys.executable, "-I", str(args.neutralize_script.resolve()), str(out_dir / CUBES["v3_bright"][0]),
+               str(out_dir / fname), title]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode != 0:
+            sys.exit(f"neutralize script failed ({res.returncode}): {res.stderr.strip()}")
+        luts[key] = read_cube(out_dir / fname)
+        log(f"[lut] wrote {out_dir / fname} via {args.neutralize_script.name}")
 
     # ---- leave one pair out
     loo = {}
     for held in fit_names:
         t = time.time()
         rng = np.random.default_rng(SEED + 2)
-        fold_models = {v.key: get_model([n for n in sets[v.data] if n != held], v.toe) for v in VARIANTS}
+        fold_models = {v.key: get_model([n for n in sets[v.data] if n != held], v.toe, v.lch) for v in VARIANTS}
         fl = {v.key: fold_models[v.key].bake_variant(v) for v in VARIANTS}
-        fl.update({k: brighten(fl["v2"], st) for k, st in BRIGHT.items()})
+        fl.update({k: brighten(fl[src], st) for k, (src, st) in BRIGHT.items()})
         m2 = fold_models["v2"]
         tone = m2.bake(m2.median_gain(), residual=False)
         pr = pdata[held]
+        xs, ys = sample_pixels(pr, pr.valid & ~near_clip_mask(pr), np.random.default_rng(SEED + 9), 150000)
+        se = enc(np.clip(xs, 0, 1))
         loo[held] = {
             "valid": evaluate({"identity": None, "tone": tone} | fl, pr, pr.valid, rng),
-            "exposure_matched": evaluate({"identity": None, "v1": fl["v1"], "v2": fl["v2"]}, pr, pr.valid, rng, True),
-            "loose": evaluate({"identity": None, "v1": fl["v1"], "v2": fl["v2"]}, pr, pr.loose, rng),
+            "exposure_matched": evaluate({"identity": None, "v1": fl["v1"], "v2": fl["v2"], "v3": fl["v3"]}, pr, pr.valid, rng, True),
+            "loose": evaluate({"identity": None, "v1": fl["v1"], "v2": fl["v2"], "v3": fl["v3"]}, pr, pr.loose, rng),
             "white_target": m2.white["target_L"],
+            "sectors": sector_stats(se, {"data": enc(np.clip(ys, 0, 1)), "v2": apply_lut(fl["v2"], se),
+                                         "v3": apply_lut(fl["v3"], se)}),
         }
         v = loo[held]["valid"]
         log(f"[loo] {held}: identity {mp(v['identity'])}, v1 {mp(v['v1'])}, data {mp(v['data'])}, toe {mp(v['toe'])}, "
-            f"neutral {mp(v['neutral'])}, white {mp(v['white'])}, v2 {mp(v['v2'])} ({time.time() - t:.1f}s)")
+            f"neutral {mp(v['neutral'])}, white {mp(v['white'])}, v2 {mp(v['v2'])}, v3 {mp(v['v3'])} ({time.time() - t:.1f}s)")
 
     # ---- in-sample (v2)
     m2 = models["v2"]
@@ -1374,22 +1794,29 @@ def main() -> int:
                                pdata[n], pdata[n].valid, rng)
 
     # ---- previews, probes, user photos
-    prev_luts = {"v1": luts["v1"], "v2": luts["v2"]}
+    prev_luts = {"v2": luts["v2"], "v3": luts["v3"]}
     probes = []
     for spec in specs:
         stock, chroma = images[spec.name]
         size = make_preview(stock, chroma, regs.get(spec.name), prev_luts, out_dir / f"preview_{spec.name}.jpg")
         log(f"[preview] preview_{spec.name}.jpg ({size})")
         probes += measure_pair_probes(spec, stock, chroma, regs.get(spec.name), pdata.get(spec.name),
-                                      {"v1": luts["v1"], "v2": luts["v2"]}, diag)
+                                      {"v1": luts["v1"], "v2": luts["v2"], "v3": luts["v3"]}, diag)
     user = []
     if args.user_photos_dir is not None:
-        user = run_user_tests(args.user_photos, args.user_photos_dir.resolve(),
-                              {k: luts[k] for k in ("v1", "v2", "v2_bright", "v2_brighter")}, out_dir)
+        keys = [k for k in ("v2", "v3", "v2_bright", "v3_bright", "v3_bright_neutral") if k in luts]
+        user = run_user_tests(args.user_photos, args.user_photos_dir.resolve(), {k: luts[k] for k in keys}, out_dir)
 
     plot_tone_curves(models, [pdata[n] for n in fit_names], diag / "tone_curve.png")
+    plot_hue_gain(models["v3"], diag / "hue_gain.png")
+    consistency = saturation_consistency([pdata[n] for n in fit_names])
     ctx = build_context(args, specs, spec_by, images, regs, pdata, fit_names, sets, anchor, models, luts, loo,
                         insample, probes, user, t_start)
+    ctx.update(build_v3_context(ctx, models, luts, loo, probes, consistency, spec_by))
+    hg = models["v3"].hue_gain
+    ctx["metrics"]["v3"] = ctx["v3"] | {"hue_gain_abs": np.abs(hg.coeffs).tolist(),
+                                        "hue_gain_deg": np.degrees(np.angle(hg.coeffs)).tolist(),
+                                        "disagreement": ctx["v3_disagreement"]}
     write_report(out_dir / "report.md", ctx)
     (diag / "metrics.json").write_text(json.dumps(ctx["metrics"], indent=2, default=float), encoding="utf-8")
     log(f"[done] report {out_dir / 'report.md'} in {time.time() - t_start:.0f}s")
@@ -1490,11 +1917,12 @@ def write_report(path: Path, c: dict) -> None:
     L.append("Command (run from the repository root):\n")
     L.append("```\n" + c["command"] + "\n```\n")
     L.append(f"Runtime {c['runtime_s']:.0f} s, seed {SEED}. LUTs: " + ", ".join(f"`{f}` ({d})" for f, d in CUBES.values())
-             + ". Previews: `preview_<pair>.jpg` (stock | v1 | v2 | Chromagraph), `user_test_<photo>.jpg`. "
+             + ". Previews: `preview_<pair>.jpg` (stock | v2 | v3 | Chromagraph), `user_test_<photo>.jpg`. "
                "Diagnostics: `diagnostics/` (registration overlays, probe boxes, tone curves, `metrics.json`).\n")
 
-    # ---- verdict
-    L.append("## Verdict\n")
+    # ---- v3 (round 3) first, then the v2 record
+    write_v3_sections(L, c)
+    L.append("## v2 verdict (round 2)\n")
     v1m, v2m = mean["v1"], mean["v2"]
     L.append(
         f"Averaged over all {len(held)} held-out pairs, v2's CIEDE2000 is **{v2m['median']:.2f} median / {v2m['p95']:.2f} p95** "
@@ -1513,15 +1941,6 @@ def write_report(path: Path, c: dict) -> None:
         for e in c["flags"]:
             L.append(f"- **Flag:** `{SHORT[e['key']]}` changes the mean held-out median by {e['delta']:+.2f} against "
                      f"`{SHORT[e['ref']]}`" + (f"; worse by more than 0.5 on {', '.join(e['worse'])}" if e["worse"] else "") + ".")
-        L.append("")
-    if c["user"]:
-        L.append("User photos (median over each probe box; stock → v1 → v2 → v2 bright → v2 brighter):\n")
-        rows = []
-        for u in c["user"]:
-            for p in u["probes"]:
-                vals = p["values"]
-                rows.append([u["name"], p["probe"]] + [lab_str(vals[k]) for k in ("stock", "v1", "v2", "v2_bright", "v2_brighter")])
-        L.append(table(["Photo", "Probe", "Stock", "v1", "v2", "v2 bright", "v2 brighter"], rows))
         L.append("")
 
     # ---- v2 changes
@@ -1572,9 +1991,11 @@ def write_report(path: Path, c: dict) -> None:
     L.append("Named neutral-white probes (median over the boxes in `diagnostics/probes_*.jpg`):\n")
     rows = []
     for p in c["probes"]:
+        if p["kind"] != "neutral":
+            continue
         rows.append([p["pair"], p["probe"], lab_str(p["stock"]), lab_str(p["chroma"]) + (f" ({p['how']})" if p["how"] else ""),
-                     lab_str(p["luts"]["v1"]), lab_str(p["luts"]["v2"])])
-    L.append(table(["Pair", "Probe", "Stock", "Real Chromagraph", "v1", "v2"], rows))
+                     lab_str(p["luts"]["v1"]), lab_str(p["luts"]["v2"]), lab_str(p["luts"]["v3"])])
+    L.append(table(["Pair", "Probe", "Stock", "Real Chromagraph", "v1", "v2", "v3"], rows))
     L.append("")
     g = c["neutral_grid"]
     rows = []

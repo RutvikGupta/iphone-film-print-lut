@@ -17,6 +17,14 @@ Each file is a 33-point 3D LUT. Input and output are both sRGB-encoded. Apps tha
 | [chromagraph_v2_brighter_33.cube](luts/chromagraph_v2_brighter_33.cube) | The same look with shadows lifted 1.5 stops. | Dim or indoor photos. |
 | [chromagraph_v2_bright_neutral_33.cube](luts/chromagraph_v2_bright_neutral_33.cube) | The bright version, with greys and whites kept free of colour cast. | You dislike the cream highlights. This departs from the app, which does turn bright whites cream. |
 
+**Experimental (v3)**, in [luts/experimental](luts/experimental). v3 adds a per-hue saturation and hue correction. It scores slightly better than v2 on typical pixels and slightly worse on the worst ones. Its corrections for saturated blues and magentas rest on little data, so blue or purple objects may look off. v2 bright remains the recommended file.
+
+| File | What it does |
+|---|---|
+| [chromagraph_v3_33.cube](luts/experimental/chromagraph_v3_33.cube) | v3 at the fitted exposure. |
+| [chromagraph_v3_bright_33.cube](luts/experimental/chromagraph_v3_bright_33.cube) | v3 with shadows lifted 0.75 stop. |
+| [chromagraph_v3_bright_neutral_33.cube](luts/experimental/chromagraph_v3_bright_neutral_33.cube) | v3 bright, with greys and whites kept free of colour cast. |
+
 ## Use it
 
 **iPhone:**
@@ -58,8 +66,9 @@ Scores are CIEDE2000, a standard colour-difference measure where lower is better
 | Stock photo, unchanged | 14.5 | 23.5 |
 | v1 (4 pairs) | 7.4 | 15.6 |
 | **v2 (9 pairs)** | **6.7** | **14.7** |
+| v3 (experimental) | 6.4 | 14.9 |
 
-v2 beats v1 on 7 of the 9 pairs. The full numbers are in [docs/fit-report.md](docs/fit-report.md).
+v2 beats v1 on 7 of the 9 pairs. v3 beats v2 on 4 of the 9. The full numbers are in [docs/fit-report.md](docs/fit-report.md).
 
 **What matches:**
 - the film-style tone curve;
@@ -68,7 +77,7 @@ v2 beats v1 on 7 of the 9 pairs. The full numbers are in [docs/fit-report.md](do
 - neutral shadows.
 
 **Known gaps:**
-- Saturated reds, oranges and yellows come out too muted. Chromagraph darkens them but keeps their saturation. A v3 fit addressing this is in progress.
+- Some photos show Chromagraph keeping strong reds and oranges saturated, and the LUTs mute them. Only 2 of 8 public pairs show that behaviour. The rest show Chromagraph muting warm colours too, so no single LUT can match every scene.
 - The input is Apple's already-processed photo. Apple's local tone mapping varies from scene to scene, so a single LUT can only approximate the app.
 - There is no grain or halation.
 

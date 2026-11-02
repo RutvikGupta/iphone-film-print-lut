@@ -10,7 +10,7 @@
     "deliberate_exposure": "free text shown in the report when a pair was deliberately shot at a different exposure",
     "mask_top_fraction": "share of the frame height masked at the top of both images (labels)",
     "stock_source": "'stock_camera' (default) or 'apple_raw_render'",
-    "probes": "named regions measured in the report; 'boxes' are [x0, y0, x1, y1] fractions of the stock frame (Chromagraph values come from the registered image), 'chroma_boxes' are fractions of the Chromagraph frame and are used instead when given"
+    "probes": "named regions measured in the report; 'boxes' are [x0, y0, x1, y1] fractions of the stock frame (Chromagraph values come from the registered image), 'chroma_boxes' are fractions of the Chromagraph frame and are used instead when given; 'kind' is 'neutral' (default, reported as L*a*b*) or 'colour' (reported as L*C*h)"
   },
   "pairs": [
     {
@@ -33,7 +33,13 @@
       "deliberate_exposure": "Chromagraph shot deliberately underexposed by the author",
       "scene": "Daylight autumn trees, blue sky, yellow chair on grass",
       "alignment": "Similar framing, slightly different crop",
-      "notes": "The author deliberately underexposed the Chromagraph shot."
+      "notes": "The author deliberately underexposed the Chromagraph shot.",
+      "probes": [
+        {"name": "red-orange leaves", "kind": "colour", "boxes": [[0.02, 0.08, 0.15, 0.16], [0.60, 0.02, 0.75, 0.10]]},
+        {"name": "yellow chair", "kind": "colour", "boxes": [[0.41, 0.63, 0.53, 0.69]]},
+        {"name": "green grass", "kind": "colour", "boxes": [[0.05, 0.58, 0.30, 0.64]]},
+        {"name": "blue sky", "kind": "colour", "boxes": [[0.32, 0.10, 0.44, 0.14], [0.86, 0.38, 0.98, 0.42]]}
+      ]
     },
     {
       "name": "vsgfield", "stock": "vsgfield_stock.jpg", "chromagraph": "vsgfield_chroma.jpg", "use": "fit", "round": 1,
@@ -52,7 +58,12 @@
       "name": "aitree", "stock": "aitree_stock.jpg", "chromagraph": "aitree_chroma.jpg", "use": "fit", "round": 1,
       "scene": "Red autumn tree against blue sky (AppleInsider, iPhone 17 Camera vs Chromagraph, both unedited)",
       "alignment": "Framing noticeably shifted; cut from a 653x805 collage with labels removed",
-      "notes": "Fitted only if registration passes; otherwise preview only."
+      "notes": "Fitted only if registration passes; otherwise preview only. Apple clips many of the reds.",
+      "probes": [
+        {"name": "bright red leaves", "kind": "colour", "boxes": [[0.30, 0.20, 0.45, 0.35]]},
+        {"name": "darker red leaves", "kind": "colour", "boxes": [[0.55, 0.60, 0.75, 0.70]]},
+        {"name": "blue sky", "kind": "colour", "boxes": [[0.05, 0.01, 0.12, 0.05], [0.63, 0.005, 0.70, 0.06]]}
+      ]
     },
     {
       "name": "breaks", "stock": "breaks_stock.jpg", "chromagraph": "breaks_chroma.jpg", "use": "preview", "round": 1,
@@ -106,7 +117,13 @@
       "name": "pallav", "stock": "pallav_stock.jpg", "chromagraph": "pallav_chroma.jpg", "use": "fit", "round": 2,
       "scene": "Daylight New York skyline with blue sky",
       "alignment": "Nearly the same framing (author: 'right is default camera')",
-      "notes": "Stock embeds Display P3."
+      "notes": "Stock embeds Display P3.",
+      "probes": [
+        {"name": "blue sky", "kind": "colour", "boxes": [[0.45, 0.05, 0.85, 0.30]]},
+        {"name": "sunlit beige building", "kind": "colour", "boxes": [[0.72, 0.62, 0.88, 0.85]]},
+        {"name": "red-brick building", "kind": "colour", "boxes": [[0.86, 0.565, 0.98, 0.615]]},
+        {"name": "bridge", "kind": "colour", "boxes": [[0.46, 0.55, 0.60, 0.585]]}
+      ]
     },
     {
       "name": "bencsinB", "stock": "bencsinB_stock.jpg", "chromagraph": "bencsinB_chroma.jpg", "use": "fit", "round": 2,
