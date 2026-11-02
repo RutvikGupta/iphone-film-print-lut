@@ -1,0 +1,6 @@
+pairs-data/
+fit-out/
+__pycache__/
+*.heic
+*.HEIC
+.DS_Store

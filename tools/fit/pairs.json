@@ -1,0 +1,145 @@
+{
+  "description": "Public stock-iPhone vs Chromagraph photo pairs used by fit_look.py. File names are relative to --data-dir. Add a pair by appending an entry; no code changes are needed.",
+  "fields": {
+    "use": "'fit' = candidate for fitting, kept only if registration passes the checks in fit_look.py (otherwise preview only); 'preview' = preview only, never fitted",
+    "round": "1 = pairs used for the v1 LUT (v1 is regenerated from these for comparison); later rounds add data",
+    "weight": "relative weight in both fitting stages (default 1)",
+    "toe_weight": "weight of this pair's shadow samples (stock luma below mid-grey) when fitting the tone curve (default 1)",
+    "neutral_weight": "weight of this pair in the neutral-axis evidence (default = weight); 0 for night white balance",
+    "same_exposure": "true when both images come from the same RAW exposure; the first such fitted pair anchors the reported gains, and these pairs get their own held-out table",
+    "deliberate_exposure": "free text shown in the report when a pair was deliberately shot at a different exposure",
+    "mask_top_fraction": "share of the frame height masked at the top of both images (labels)",
+    "stock_source": "'stock_camera' (default) or 'apple_raw_render'",
+    "probes": "named regions measured in the report; 'boxes' are [x0, y0, x1, y1] fractions of the stock frame (Chromagraph values come from the registered image), 'chroma_boxes' are fractions of the Chromagraph frame and are used instead when given"
+  },
+  "pairs": [
+    {
+      "name": "sliwex", "stock": "sliwex_stock.jpg", "chromagraph": "sliwex_chroma.jpg", "use": "fit", "round": 1,
+      "toe_weight": 0.25, "neutral_weight": 0.0,
+      "deliberate_exposure": "night scene; Chromagraph much darker (author: both straight out of camera)",
+      "scene": "Night street, parcel locker under LED and orange sodium light",
+      "alignment": "Same scene, similar framing, slight shift",
+      "notes": "Chromagraph is much darker; the author says both are straight out of camera."
+    },
+    {
+      "name": "drift", "stock": "drift_stock.jpg", "chromagraph": "drift_chroma.jpg", "use": "fit", "round": 1,
+      "scene": "Daylight palm trees, lake, houses, sky",
+      "alignment": "Same scene; different lens or crop",
+      "notes": "Chromagraph's sky goes cream and its greens are darker."
+    },
+    {
+      "name": "fahim", "stock": "fahim_stock.jpg", "chromagraph": "fahim_chroma.jpg", "use": "fit", "round": 1,
+      "toe_weight": 0.25,
+      "deliberate_exposure": "Chromagraph shot deliberately underexposed by the author",
+      "scene": "Daylight autumn trees, blue sky, yellow chair on grass",
+      "alignment": "Similar framing, slightly different crop",
+      "notes": "The author deliberately underexposed the Chromagraph shot."
+    },
+    {
+      "name": "vsgfield", "stock": "vsgfield_stock.jpg", "chromagraph": "vsgfield_chroma.jpg", "use": "fit", "round": 1,
+      "same_exposure": true, "mask_top_fraction": 0.08, "stock_source": "apple_raw_render",
+      "scene": "Backlit flower field with the sun",
+      "alignment": "Same RAW exposure rendered twice; near-perfect alignment",
+      "notes": "Stock side is Apple's default rendering of a 48 MP iPhone RAW, not a stock-Camera HEIC. Red text labels near the top of both images; the top 8% of the frame is masked."
+    },
+    {
+      "name": "vsgsun", "stock": "vsgsun_stock.jpg", "chromagraph": "vsgsun_chroma.jpg", "use": "fit", "round": 1,
+      "scene": "Sunlit field",
+      "alignment": "Two separate captures with a shifted viewpoint",
+      "notes": "Fitted only if registration passes; otherwise preview only."
+    },
+    {
+      "name": "aitree", "stock": "aitree_stock.jpg", "chromagraph": "aitree_chroma.jpg", "use": "fit", "round": 1,
+      "scene": "Red autumn tree against blue sky (AppleInsider, iPhone 17 Camera vs Chromagraph, both unedited)",
+      "alignment": "Framing noticeably shifted; cut from a 653x805 collage with labels removed",
+      "notes": "Fitted only if registration passes; otherwise preview only."
+    },
+    {
+      "name": "breaks", "stock": "breaks_stock.jpg", "chromagraph": "breaks_chroma.jpg", "use": "preview", "round": 1,
+      "scene": "Indoor black dog on a wood floor",
+      "alignment": "Different framing and the dog moved; cannot be registered",
+      "notes": "Visual preview only; never fitted."
+    },
+    {
+      "name": "robby", "stock": "robby_stock.jpg", "chromagraph": "robby_chroma.jpg", "use": "fit", "round": 2,
+      "weight": 2.0, "same_exposure": true, "stock_source": "apple_raw_render",
+      "scene": "Ferris wheel and palm trees at dusk; white structure against a blue-to-warm sky",
+      "alignment": "Same RAW rendered both ways ('Chromagraph default settings // Apple RAW'); near-perfect alignment",
+      "notes": "High weight: same exposure, aligned, with white structure.",
+      "probes": [
+        {"name": "white structure (base container, right leg)", "boxes": [[0.29, 0.912, 0.36, 0.935], [0.475, 0.915, 0.535, 0.95], [0.526, 0.51, 0.536, 0.525]]}
+      ]
+    },
+    {
+      "name": "satoru", "stock": "satoru_stock.jpg", "chromagraph": "satoru_chroma.jpg", "use": "fit", "round": 2,
+      "weight": 2.0,
+      "scene": "Lake through a window; white railing posts, pale blue sky, dry grass",
+      "alignment": "Unedited, framing nearly identical",
+      "notes": "High weight. The white posts are the best neutral-white evidence. Both files embed Display P3.",
+      "probes": [
+        {"name": "white railing posts", "boxes": [[0.4935, 0.69, 0.5055, 0.83], [0.776, 0.69, 0.790, 0.83], [0.230, 0.68, 0.250, 0.83]]}
+      ]
+    },
+    {
+      "name": "alli", "stock": "alli_stock.jpg", "chromagraph": "alli_chroma.jpg", "use": "fit", "round": 2,
+      "scene": "Indoor front-camera selfie: skin, cream wall, framed blue and orange print",
+      "alignment": "Framing differs; the Chromagraph shot is wider",
+      "notes": "Only skin and indoor data. Fitted only if registration passes; probes are measured in each frame separately.",
+      "probes": [
+        {"name": "cream wall", "boxes": [[0.22, 0.05, 0.70, 0.19]], "chroma_boxes": [[0.32, 0.14, 0.74, 0.33]]},
+        {"name": "skin (forehead)", "boxes": [[0.45, 0.40, 0.60, 0.455]], "chroma_boxes": [[0.57, 0.42, 0.71, 0.465]]}
+      ]
+    },
+    {
+      "name": "batman", "stock": "batman_stock.jpg", "chromagraph": "batman_chroma.jpg", "use": "preview", "round": 2,
+      "scene": "Night alley under string lights, mixed tungsten light",
+      "alignment": "Similar framing",
+      "notes": "Preview only, so night white balance does not skew the neutral axis. Chromagraph renders it strongly orange."
+    },
+    {
+      "name": "kiriya", "stock": "kiriya_stock.jpg", "chromagraph": "kiriya_chroma.jpg", "use": "preview", "round": 2,
+      "scene": "Night telephoto skyline",
+      "alignment": "Chromagraph is a 2880x1206 widescreen crop of a 4032x3024 frame",
+      "notes": "Preview only."
+    },
+    {
+      "name": "pallav", "stock": "pallav_stock.jpg", "chromagraph": "pallav_chroma.jpg", "use": "fit", "round": 2,
+      "scene": "Daylight New York skyline with blue sky",
+      "alignment": "Nearly the same framing (author: 'right is default camera')",
+      "notes": "Stock embeds Display P3."
+    },
+    {
+      "name": "bencsinB", "stock": "bencsinB_stock.jpg", "chromagraph": "bencsinB_chroma.jpg", "use": "fit", "round": 2,
+      "weight": 2.0,
+      "scene": "Indoor hotel lobby: white ceiling, cream cushions, warm lamps, plants",
+      "alignment": "Nearly the same framing",
+      "notes": "High value: Chromagraph renders the whites more neutral or cooler than the stock image.",
+      "probes": [
+        {"name": "white ceiling", "boxes": [[0.03, 0.015, 0.18, 0.08], [0.47, 0.15, 0.60, 0.175]]},
+        {"name": "white window shades", "boxes": [[0.41, 0.29, 0.50, 0.335]]},
+        {"name": "cream cushions", "boxes": [[0.645, 0.445, 0.695, 0.47], [0.54, 0.445, 0.585, 0.47]]}
+      ]
+    },
+    {
+      "name": "bencsinC", "stock": "bencsinC_stock.jpg", "chromagraph": "bencsinC_chroma.jpg", "use": "fit", "round": 2,
+      "scene": "Dark hallway with warm cove lighting and a bright window at the end",
+      "alignment": "Similar framing",
+      "notes": "Chromagraph neutralizes much of the stock image's orange ceiling warmth; the window becomes soft cream-white.",
+      "probes": [
+        {"name": "window", "boxes": [[0.51, 0.45, 0.575, 0.525]]},
+        {"name": "pale wall by window", "boxes": [[0.468, 0.46, 0.493, 0.66]]},
+        {"name": "lit ceiling (orange in stock)", "boxes": [[0.43, 0.25, 0.59, 0.285]]}
+      ]
+    },
+    {
+      "name": "bencsinA", "stock": "bencsinA_stock.jpg", "chromagraph": "bencsinA_chroma.jpg", "use": "fit", "round": 2,
+      "weight": 0.5,
+      "scene": "Gym at night through glass: reflections, white walls under indoor light",
+      "alignment": "Similar framing; reflections in the glass",
+      "notes": "Low weight; fitted only if registration passes.",
+      "probes": [
+        {"name": "white wall", "boxes": [[0.88, 0.45, 0.98, 0.80]]}
+      ]
+    }
+  ]
+}
